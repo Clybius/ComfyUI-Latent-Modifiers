@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 '''
-    The following gaussian functions were utilized from the Fooocus UI, many thanks to github.com/Illyasviel !
+    The following gaussian functions were utilized from the Fooocus UI, many thanks to github.com/lllyasviel !
 '''
 def gaussian_kernel(kernel_size, sigma):
     kernel = np.fromfunction(

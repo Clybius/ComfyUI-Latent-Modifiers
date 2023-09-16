@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from latent_preview import Latent2RGBPreviewer
 
 
 '''
@@ -441,6 +440,16 @@ def train_difference(a: Tensor, b: Tensor, c: Tensor) -> Tensor:
     new_diff = scale * torch.abs(diff_AB)
     return new_diff
 
+# Contrast function
+
+def contrast(x: Tensor):
+    # Calculate the mean and standard deviation of the pixel values
+    mean = x.mean(dim=(1,2,3), keepdim=True)
+    stddev = x.std(dim=(1,2,3), keepdim=True)
+    # Scale the pixel values by the standard deviation
+    scaled_pixels = (x - mean) / stddev
+    return scaled_pixels
+
 class ModelSamplerLatentMegaModifier:
     @classmethod
     def INPUT_TYPES(s):
@@ -450,6 +459,7 @@ class ModelSamplerLatentMegaModifier:
                               "tonemap_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                               "tonemap_method": (["reinhard", "arctan", "quantile"], ),
                               "tonemap_percentile": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 100.0, "step": 0.05}),
+                              "contrast_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1}),
                               "rescale_cfg_phi": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                               "extra_noise_type": (["gaussian", "perlin", "pink", "green"], ),
                               "extra_noise_method": (["add", "add_scaled", "speckle"], ),
@@ -460,7 +470,7 @@ class ModelSamplerLatentMegaModifier:
 
     CATEGORY = "clybNodes"
 
-    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier):
+    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier):
         match sharpness_method:
             case "anisotropic":
                 degrade_func = bilateral_blur
@@ -521,6 +531,8 @@ class ModelSamplerLatentMegaModifier:
             degraded_cond = degrade_func(cond) * alpha + cond * (1.0 - alpha) # Mix the modified latent with the existing latent by the alpha
             noise_pred_degraded = (degraded_cond - uncond) # New noise pred
 
+            # After this point, we use `noise_pred_degraded` instead of just `cond` for the final set of calculations
+
             # Tonemap noise
             if tonemap_multiplier == 0:
                 new_magnitude = 1.0
@@ -559,6 +571,11 @@ class ModelSamplerLatentMegaModifier:
                     case _:
                         print("Could not tonemap, for the method was not found.")
 
+            # Contrast, after tonemapping, to ensure user-set contrast is expected to behave similarly across tonemapping settings
+            alpha = 1.0 - (timestep / 999.0)[:, None, None, None].clone() # Get alpha multiplier, lower alpha at high sigmas/high noise
+            alpha *= 0.001 * contrast_multiplier # User-input and weaken the strength so we don't annihilate the latent.
+            noise_pred_degraded = contrast(noise_pred_degraded) * alpha + noise_pred_degraded * (1.0 - alpha) # Mix the modified latent with the existing latent by the alpha
+
             # Rescale CFG
             if rescale_cfg_phi == 0:
                 x_final = uncond + noise_pred_degraded * cond_scale
@@ -570,13 +587,9 @@ class ModelSamplerLatentMegaModifier:
                 x_rescaled = x_cfg * (ro_pos / ro_cfg)
                 x_final = rescale_cfg_phi * x_rescaled + (1.0 - rescale_cfg_phi) * x_cfg
 
+
             return x_final # General formula for CFG. uncond + (cond - uncond) * cond_scale
 
         m = model.clone()
         m.set_model_sampler_cfg_function(modify_latent)
         return (m, )
-
-
-NODE_CLASS_MAPPINGS = {
-    "Latent Diffusion Mega Modifier": ModelSamplerLatentMegaModifier,
-}

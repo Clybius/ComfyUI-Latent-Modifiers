@@ -11,9 +11,15 @@ This can lead to more perceptual detail, especially at higher strengths.
 
 * Rescale: Scales the CFG by comparing the standard deviation to the existing latent to dynamically lower the CFG.
 
-* Extra Noise: Adds extra noise in the middle of the diffusion process, akin to how sharpness sharpens the noise.
+* Extra Noise: Adds extra noise in the middle of the diffusion process to conditioning, and do the inverse operation on unconditioning, if chosen.
 
 * Contrast: Adjusts the contrast of the conditioning, can lead to more pop-style results. Essentially functions as a secondary CFG slider for stylization, without changing subject pose and location much, if at all.
+
+* Combat CFG Drift: As we increase CFG, the mean will slightly drift away from 0. This subtracts the mean or median of the latent. Can lead to potentially sharper and higher frequency results, but may result in discoloration.
+
+* Divisive Norm: Normalizes the latent using avg_pool2d, and can reduce noisy artifacts, due in part to features such as sharpness.
+
+* Spectral Modulation: Converts the latent to frequencies, and clamps higher frequencies while boosting lower ones, then converts it back to an image latent. This effectively can be treated as a solution to oversaturation or burning as a result of higher CFG values, while not touching values around the median.
 
 ### Tonemapping Methods Explanation:
 * Reinhard: <p>Uses the reinhard method of tonemapping (from comfyanonymous' ComfyUI Experiments) to clamp the CFG if the difference is too strong.
@@ -26,12 +32,32 @@ This can lead to more perceptual detail, especially at higher strengths.
 
 
   `Closer to 100 percentile == stronger clamping`. Recommended values for testing: tonemap_multiplier of 1, tonemap_percentile of 99.</p>
+* Gated: <p>Clamps the values using torch.quantile, only if above a specific floor value, which is set by `tonemapping_multiplier`. Clamps the noise prediction latent based on the percentile.
+
+
+  `Closer to 100 percentile == stronger clamping, lower tonemapping_multiplier == stronger clamping`. Recommended values for testing: tonemap_multiplier of 0.8-1, tonemap_percentile of 99.995.</p>
+* CFG-Mimic: <p>Attempts to mimic a lower or higher CFG based on `tonemapping_multiplier`, and clamps it using `tonemapping_percentile` with torch.quantile.
+
+
+  `Closer to 100 percentile == stronger clamping, lower tonemapping_multiplier == stronger clamping`. Recommended values for testing: tonemap_multiplier of 0.33-1.0, tonemap_percentile of 100.</p>
 
 ### Contrast Explanation:
-<p>Scales the pixel values by the standard deviation, achieving a more contrasty look. In practice, this can effectively act as a secondary CFG slider for stylization. It doesn't modify subject poses much, if at all, which can be great for those looking to get more oomf out of their low-cfg setups.</p>
+<p>Scales the pixel values by the standard deviation, achieving a more contrasty look. In practice, this can effectively act as a secondary CFG slider for stylization. It doesn't modify subject poses much, if at all, which can be great for those looking to get more oomf out of their low-cfg setups.
+
+Using a negative value will not de-contrast, but instead will use a differing method to do the contrast operation. -33 ought to be near-equivalent to 33 in this case, for example. Feel free to play around and share which you prefer!</p>
+
+### Spectral Modification Explanation:
+<p>We boost the low frequencies (low rate of change in the noise), and we lower the high frequencies (high rates of change in the noise). 
+
+Change the low/high frequency range using `spectral_mod_percentile` (default of 5.0, which is the upper and lower 5th percentiles.)
+
+Increase/Decrease the strength of the adjustment by increasing `spectral_mod_multiplier`
+
+Beware of percentile values higher than 15, and multiplier values higher than 5. Here be dragons (may cause it to "noise-out", or become full of nonsensical noise, especially earlier in the diffusion process).</p>
+
 
 #### Current Pipeline:
->##### Add extra noise to conditioning -> Sharpen conditioning -> Tonemap conditioning -> Modify contrast of conditioning -> Rescale CFG
+>##### Add extra noise to conditioning -> Sharpen conditioning -> Convert to Noise Prediction -> Tonemap Noise Prediction -> Spectral Modification -> Modify contrast of noise prediction -> Rescale CFG -> Divisive Normalization -> Combat CFG Drift
 
 #### Why use this over `x` node?
 Since the `set_model_sampler_cfg_function` hijack in ComfyUI can only utilize a single function, we bundle many latent modification methods into one large function for processing. This is simpler than taking an existing hijack and modifying it, which may be possible, but my (Clybius') lack of Python/PyTorch knowledge leads to this being the optimal method for simplicity. If you know how to do this, feel free to reach out through any means!

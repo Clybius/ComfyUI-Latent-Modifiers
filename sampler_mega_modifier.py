@@ -654,7 +654,7 @@ def spectral_modulation_soft(image: Tensor, modulation_multiplier: float, spectr
     )
     
     mask_mult = ((additive_mult_low * additive_mult_high) ** modulation_multiplier)
-    print(mask_mult)
+    
     filtered_fourier = fourier * mask_mult
     
     # Inverse transform back to spatial domain

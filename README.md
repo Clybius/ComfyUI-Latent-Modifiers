@@ -53,7 +53,7 @@ Change the low/high frequency range using `spectral_mod_percentile` (default of 
 
 Increase/Decrease the strength of the adjustment by increasing `spectral_mod_multiplier`
 
-Beware of percentile values higher than 15, and multiplier values higher than 5. Here be dragons (may cause it to "noise-out", or become full of nonsensical noise, especially earlier in the diffusion process).</p>
+Beware of percentile values higher than 15 and multiplier values higher than 5, especially for hard clamping. Here be dragons, as large values may cause it to "noise-out", or become full of non-sensical noise, especially earlier in the diffusion process.</p>
 
 
 #### Current Pipeline:

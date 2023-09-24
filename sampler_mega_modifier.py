@@ -681,8 +681,8 @@ class ModelSamplerLatentMegaModifier:
                               "extra_noise_lowpass": ("INT", {"default": 100, "min": 0, "max": 1000, "step": 1}),
                               "divisive_norm_size": ("INT", {"default": 0, "min": 0, "max": 31, "step": 1}),
                               "spectral_mod_mode": (["hard_clamp", "soft_clamp"], ),
-                              "spectral_mod_percentile": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.01}),
-                              "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 5.0, "step": 0.01}),
+                              "spectral_mod_percentile": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 50.0, "step": 0.01}),
+                              "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 15.0, "step": 0.01}),
                               "affect_uncond": (["None", "Sharpness"], ),
                               }}
     RETURN_TYPES = ("MODEL",)

@@ -9,6 +9,12 @@ import random
 GENERATOR = None
 RAND = None
 
+def get_random():
+    global RAND
+    if RAND:
+        return RAND.random()
+    return random.random()
+
 # rand(n)_like. but with generator support
 def gen_like(f, input):
     global GENERATOR
@@ -743,12 +749,11 @@ def spectral_modulation_soft(image: Tensor, modulation_multiplier: float, spectr
 
 def pyramid_noise_like(x, discount=0.9):
   global GENERATOR
-  global RAND
   b, c, w, h = x.shape # EDIT: w and h get over-written, rename for a different variant!
   u = torch.nn.Upsample(size=(w, h), mode='nearest-exact')
   noise = gen_like(torch.randn, x)
   for i in range(10):
-    r = RAND.random()*2+2 # Rather than always going 2x,
+    r = get_random()*2+2 # Rather than always going 2x,
     w, h = max(1, int(w/(r**i))), max(1, int(h/(r**i)))
     noise += u(torch.randn(b, c, w, h, generator=GENERATOR).to(x)) * discount**i
     if w==1 or h==1: break # Lowest resolution is 1x1
@@ -840,9 +845,11 @@ class ModelSamplerLatentMegaModifier:
     CATEGORY = "clybNodes"
 
     def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation, seed=None):
-        gen = torch.Generator(device='cpu')
-        rand = random.Random()
+        gen = None
+        rand = None
         if seed is not None:
+            gen = torch.Generator(device='cpu')
+            rand = random.Random()
             gen.manual_seed(seed)
             rand.seed(seed)
 

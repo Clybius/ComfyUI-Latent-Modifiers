@@ -50,7 +50,7 @@ def contrast_adaptive_sharpening(image, amount):
     # scaling
     amp = torch.copysign(torch.sqrt(torch.abs(amp)), amp)
     w = - amp * (amount * (1/5 - 1/8) + 1/8)
-    div = torch.reciprocal(1 + 4*w).clamp(-1, 1)
+    div = torch.reciprocal(1 + 4*w).clamp(-10, 10)
     
     output = ((b + d + f + h)*w + e) * div
     output = torch.nan_to_num(output)

@@ -2,7 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import random
 
+# These globals get set to instance-specific RNGs during execution
+# Using globals shouldn't be a problem since nodes don't run concurrently
+GENERATOR = None
+RAND = None
+
+# rand(n)_like. but with generator support
+def gen_like(f, input):
+    global GENERATOR
+    return f(input.size(), generator=GENERATOR).to(input)
 
 '''
     The following snippet is utilized from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/
@@ -448,6 +458,7 @@ def perlin_noise(
     return perlin_noise_tensor(vectors, positions).squeeze(0)
 
 def generate_1f_noise(tensor, alpha, k):
+    global GENERATOR
     """Generate 1/f noise for a given tensor.
 
     Args:
@@ -461,11 +472,12 @@ def generate_1f_noise(tensor, alpha, k):
     fft = torch.fft.fft2(tensor)
     freq = torch.arange(1, len(fft) + 1, dtype=torch.float)
     spectral_density = k / freq**alpha
-    noise = torch.randn(tensor.shape) * spectral_density
+    noise = torch.randn(tensor.shape, generator=GENERATOR) * spectral_density
     return noise
 
 def green_noise(width, height):
-    noise = torch.randn(width, height)
+    global GENERATOR
+    noise = torch.randn(width, height, generator=GENERATOR)
     scale = 1.0 / (width * height)
     fy = torch.fft.fftfreq(width)[:, None] ** 2
     fx = torch.fft.fftfreq(height) ** 2
@@ -729,15 +741,16 @@ def spectral_modulation_soft(image: Tensor, modulation_multiplier: float, spectr
     
     return inverse_transformed.real.to(image.device)
 
-import random
 def pyramid_noise_like(x, discount=0.9):
+  global GENERATOR
+  global RAND
   b, c, w, h = x.shape # EDIT: w and h get over-written, rename for a different variant!
   u = torch.nn.Upsample(size=(w, h), mode='nearest-exact')
-  noise = torch.randn_like(x)
+  noise = gen_like(torch.randn, x)
   for i in range(10):
-    r = random.random()*2+2 # Rather than always going 2x, 
+    r = RAND.random()*2+2 # Rather than always going 2x,
     w, h = max(1, int(w/(r**i))), max(1, int(h/(r**i)))
-    noise += u(torch.randn(b, c, w, h).to(x)) * discount**i
+    noise += u(torch.randn(b, c, w, h, generator=GENERATOR).to(x)) * discount**i
     if w==1 or h==1: break # Lowest resolution is 1x1
   return noise/noise.std() # Scaled back to roughly unit variance
 
@@ -816,14 +829,31 @@ class ModelSamplerLatentMegaModifier:
                               "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 15.0, "step": 0.01}),
                               "affect_uncond": (["None", "Sharpness"], ),
                               "dyn_cfg_augmentation": (["None", "dyncfg-halfcosine", "dyncfg-halfcosine-mimic"], ),
-                              }}
+                              },
+                "optional": {
+                "seed": ("INT", {"min": 0, "max": 0xffffffffffffffff})
+                }}
+
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "mega_modify"
 
     CATEGORY = "clybNodes"
 
-    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation):
+    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation, seed=None):
+        gen = torch.Generator(device='cpu')
+        rand = random.Random()
+        if seed is not None:
+            gen.manual_seed(seed)
+            rand.seed(seed)
+
+
         def modify_latent(args):
+            global GENERATOR
+            global RAND
+
+            GENERATOR = gen
+            RAND = rand
+
             x_input = args["input"]
             cond = args["cond"]
             uncond = args["uncond"]
@@ -843,13 +873,13 @@ class ModelSamplerLatentMegaModifier:
             if extra_noise_multiplier > 0:
                 match extra_noise_type:
                     case "gaussian":
-                        extra_noise = torch.randn_like(cond)
+                        extra_noise = gen_like(torch.randn, cond)
                     case "uniform":
-                        extra_noise = (torch.rand_like(cond) - 0.5) * 2 * 1.73
+                        extra_noise = (gen_like(torch.rand, cond) - 0.5) * 2 * 1.73
                     case "perlin":
                         cond_size_0 = cond.size(dim=2)
                         cond_size_1 = cond.size(dim=3)
-                        extra_noise = perlin_noise(grid_shape=(cond_size_0, cond_size_1), out_shape=(cond_size_0, cond_size_1), batch_size=4).to(cond.device).unsqueeze(0)
+                        extra_noise = perlin_noise(grid_shape=(cond_size_0, cond_size_1), out_shape=(cond_size_0, cond_size_1), batch_size=4, generator=GENERATOR).to(cond.device).unsqueeze(0)
                         mean = torch.mean(extra_noise)
                         std = torch.std(extra_noise)
 

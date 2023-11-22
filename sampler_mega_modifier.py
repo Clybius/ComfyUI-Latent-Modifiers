@@ -796,7 +796,7 @@ class ModelSamplerLatentMegaModifier:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "sharpness_multiplier": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+                              "sharpness_multiplier": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
                               "sharpness_method": (["anisotropic", "joint-anisotropic", "gaussian", "cas"], ),
                               "tonemap_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                               "tonemap_method": (["reinhard", "reinhard_perchannel", "arctan", "quantile", "gated", "cfg-mimic", "spatial-norm"], ),
@@ -889,13 +889,12 @@ class ModelSamplerLatentMegaModifier:
                     case _:
                         print("Haven't heard of a noise method named like that before... (Couldn't find method)")
 
-            if sharpness_multiplier > 0.0:
+            if sharpness_multiplier > 0.0 or sharpness_multiplier < 0.0:
                 match sharpness_method:
                     case "anisotropic":
                         degrade_func = bilateral_blur
                     case "joint-anisotropic":
-                        s, m = torch.std_mean(args["cond"], dim=(1, 2, 3), keepdim=True)
-                        degrade_func = lambda img: joint_bilateral_blur(img, (args["cond"] - m) / s, 13, 3.0, 3.0, "reflect", "l1")
+                        degrade_func = lambda img: joint_bilateral_blur(img, (img - torch.mean(img, dim=(1, 2, 3), keepdim=True)) / torch.std(img, dim=(1, 2, 3), keepdim=True), 13, 3.0, 3.0, "reflect", "l1")
                     case "gaussian":
                         degrade_func = gaussian_filter_2d
                     case "cas":
@@ -907,7 +906,7 @@ class ModelSamplerLatentMegaModifier:
                 alpha *= 0.001 * sharpness_multiplier # User-input and weaken the strength so we don't annihilate the latent.
                 cond = degrade_func(cond) * alpha + cond * (1.0 - alpha) # Mix the modified latent with the existing latent by the alpha
                 if affect_uncond == "Sharpness":
-                    uncond += uncond - (degrade_func(uncond) * alpha + uncond * (1.0 - alpha))
+                    uncond = degrade_func(uncond) * alpha + uncond * (1.0 - alpha)
 
             time_mult = 1.0 - (timestep / 999.0)[:, None, None, None].clone()
             noise_pred_degraded = (cond - uncond) if dyn_cfg_augmentation == "None" else dyn_cfg_modifier(cond, uncond, dyn_cfg_augmentation, cond_scale, time_mult) # New noise pred

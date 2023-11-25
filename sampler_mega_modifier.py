@@ -792,6 +792,29 @@ def dyn_cfg_modifier(conditioning, unconditioning, method, cond_scale, time_mult
             return noise_pred
 
 
+# Algorithm from https://github.com/v0xie/sd-webui-cads/
+def add_cads_noise(y, timestep, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_rescale_factor, cads_rescale=False):
+    timestep_as_float = (timestep / 999.0)[:, None, None, None].clone()[0].item()
+    gamma = 0.0
+    if timestep_as_float < cads_schedule_start:
+        gamma = 1.0
+    elif timestep_as_float > cads_schedule_end:
+        gamma = 0.0
+    else: 
+        gamma = (cads_schedule_end - timestep_as_float) / (cads_schedule_end - cads_schedule_start)
+
+    y_mean, y_std = torch.mean(y), torch.std(y)
+    y = np.sqrt(gamma) * y + cads_noise_scale * np.sqrt(1 - gamma) * torch.randn_like(y)
+
+    if cads_rescale:
+        y_scaled = (y - torch.mean(y)) / torch.std(y) * y_std + y_mean
+        if not torch.isnan(y_scaled).any():
+            y = cads_rescale_factor * y_scaled + (1 - cads_rescale_factor) * y
+        else:
+            print("Encountered NaN in cads rescaling. Skipping rescaling.")
+    return y
+
+
 class ModelSamplerLatentMegaModifier:
     @classmethod
     def INPUT_TYPES(s):
@@ -816,13 +839,19 @@ class ModelSamplerLatentMegaModifier:
                               "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 15.0, "step": 0.01}),
                               "affect_uncond": (["None", "Sharpness"], ),
                               "dyn_cfg_augmentation": (["None", "dyncfg-halfcosine", "dyncfg-halfcosine-mimic"], ),
+                              "cads_enabled": (["Disabled", "Enabled"], ),
+                              "cads_schedule_start": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step":0.05}),
+                              "cads_schedule_end": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step":0.05}),
+                              "cads_noise_scale": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                              "cads_enable_rescale": (["Enabled", "Disabled"], ),
+                              "cads_rescale_factor": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
                               }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "mega_modify"
 
     CATEGORY = "clybNodes"
 
-    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation):
+    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation, cads_enabled, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_enable_rescale, cads_rescale_factor):
         def modify_latent(args):
             x_input = args["input"]
             cond = args["cond"]
@@ -836,6 +865,10 @@ class ModelSamplerLatentMegaModifier:
             x = x_input / (sigma * sigma + 1.0)
             cond = ((x - (x_input - cond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
             uncond = ((x - (x_input - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
+
+            if cads_enabled == "Enabled":
+                cond = add_cads_noise(cond, timestep, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_rescale_factor, cads_enable_rescale == "Enabled")
+                uncond = add_cads_noise(uncond, timestep, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_rescale_factor, cads_enable_rescale == "Enabled")
 
             noise_pred = (cond - uncond)
 

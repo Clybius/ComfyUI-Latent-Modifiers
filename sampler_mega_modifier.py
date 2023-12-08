@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import random
 
+# Set manual seeds for noise
+# rand(n)_like. but with generator support
+def gen_like(f, input, generator=None):
+    return f(input.size(), generator=generator).to(input)
 
 '''
     The following snippet is utilized from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/
@@ -447,7 +452,7 @@ def perlin_noise(
     positions = get_positions((bh, bw)).to(vectors)
     return perlin_noise_tensor(vectors, positions).squeeze(0)
 
-def generate_1f_noise(tensor, alpha, k):
+def generate_1f_noise(tensor, alpha, k, generator=None):
     """Generate 1/f noise for a given tensor.
 
     Args:
@@ -461,11 +466,11 @@ def generate_1f_noise(tensor, alpha, k):
     fft = torch.fft.fft2(tensor)
     freq = torch.arange(1, len(fft) + 1, dtype=torch.float)
     spectral_density = k / freq**alpha
-    noise = torch.randn(tensor.shape) * spectral_density
+    noise = torch.randn(tensor.shape, generator=generator) * spectral_density
     return noise
 
-def green_noise(width, height):
-    noise = torch.randn(width, height)
+def green_noise(width, height, generator=None):
+    noise = torch.randn(width, height, generator=generator)
     scale = 1.0 / (width * height)
     fy = torch.fft.fftfreq(width)[:, None] ** 2
     fx = torch.fft.fftfreq(height) ** 2
@@ -475,6 +480,50 @@ def green_noise(width, height):
     noise = torch.fft.ifft2(torch.fft.fft2(noise) / torch.sqrt(power))
     noise *= scale / noise.std()
     return torch.real(noise)
+
+# Algorithm from https://github.com/v0xie/sd-webui-cads/
+def add_cads_noise(y, timestep, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_rescale_factor, cads_rescale=False):
+    timestep_as_float = (timestep / 999.0)[:, None, None, None].clone()[0].item()
+    gamma = 0.0
+    if timestep_as_float < cads_schedule_start:
+        gamma = 1.0
+    elif timestep_as_float > cads_schedule_end:
+        gamma = 0.0
+    else: 
+        gamma = (cads_schedule_end - timestep_as_float) / (cads_schedule_end - cads_schedule_start)
+
+    y_mean, y_std = torch.mean(y), torch.std(y)
+    y = np.sqrt(gamma) * y + cads_noise_scale * np.sqrt(1 - gamma) * torch.randn_like(y)
+
+    if cads_rescale:
+        y_scaled = (y - torch.mean(y)) / torch.std(y) * y_std + y_mean
+        if not torch.isnan(y_scaled).any():
+            y = cads_rescale_factor * y_scaled + (1 - cads_rescale_factor) * y
+        else:
+            print("Encountered NaN in cads rescaling. Skipping rescaling.")
+    return y
+
+# Algorithm from https://github.com/v0xie/sd-webui-cads/
+def add_cads_custom_noise(y, noise, timestep, cads_schedule_start, cads_schedule_end, cads_noise_scale, cads_rescale_factor, cads_rescale=False):
+    timestep_as_float = (timestep / 999.0)[:, None, None, None].clone()[0].item()
+    gamma = 0.0
+    if timestep_as_float < cads_schedule_start:
+        gamma = 1.0
+    elif timestep_as_float > cads_schedule_end:
+        gamma = 0.0
+    else: 
+        gamma = (cads_schedule_end - timestep_as_float) / (cads_schedule_end - cads_schedule_start)
+
+    y_mean, y_std = torch.mean(y), torch.std(y)
+    y = np.sqrt(gamma) * y + cads_noise_scale * np.sqrt(1 - gamma) * noise#.sub_(noise.mean()).div_(noise.std())
+
+    if cads_rescale:
+        y_scaled = (y - torch.mean(y)) / torch.std(y) * y_std + y_mean
+        if not torch.isnan(y_scaled).any():
+            y = cads_rescale_factor * y_scaled + (1 - cads_rescale_factor) * y
+        else:
+            print("Encountered NaN in cads rescaling. Skipping rescaling.")
+    return y
 
 # Tonemapping functions
 
@@ -548,6 +597,40 @@ def contrast_with_mean(x: Tensor):
 def center_latent(tensor): #https://birchlabs.co.uk/machine-learning#combating-mean-drift-in-cfg
     """Centers on 0 to combat CFG drift."""
     tensor = tensor - tensor.mean(dim=(-2, -1)).unsqueeze(-1).unsqueeze(-1).expand(tensor.shape)
+    return tensor
+
+def center_0channel(tensor): #https://birchlabs.co.uk/machine-learning#combating-mean-drift-in-cfg
+    """Centers on 0 to combat CFG drift."""
+    std_dev_0 = tensor[:, [0]].std()
+    mean_0 = tensor[:, [0]].mean()
+    mean_12 = tensor[:, [1,2]].mean()
+    mean_3 = tensor[:, [3]].mean()
+
+    #tensor[:, [0]] /= std_dev_0
+    tensor[:, [0]] -= mean_0
+    tensor[:, [0]] += torch.copysign(torch.pow(torch.abs(mean_0), 1.5), mean_0)
+    #tensor[:, [1, 2]] -= tensor[:, [1, 2]].mean()
+    tensor[:, [1, 2]] -= mean_12 * 0.5
+    tensor[:, [3]] -= mean_3
+    tensor[:, [3]] += torch.copysign(torch.pow(torch.abs(mean_3), 1.5), mean_3)
+    return tensor# - tensor.mean(dim=(2,3), keepdim=True)
+
+def channel_rescale(tensor):
+    """Rescales channels according to a vision I had."""
+    std_dev_0 = tensor[:, [0, 1, 2, 3]].std()
+    mean_0 = tensor[:, [0, 1, 2, 3]].mean()
+    mean_3 = tensor[:, [3]].mean()
+
+    tensor[:, [0, 1, 2, 3]] = (tensor[:, [0, 1, 2, 3]] - mean_0) / std_dev_0
+    std_dev = tensor[:, [3]].std()
+    tensor[:, [3]] = (tensor[:, [3]] * std_dev) + mean_3
+
+    return tensor# - tensor.mean(dim=(2,3), keepdim=True)
+
+def center_012channel(tensor): #https://birchlabs.co.uk/machine-learning#combating-mean-drift-in-cfg
+    """Centers on 0 to combat CFG drift."""
+    curr_tens = tensor[:, [0,1,2]]
+    tensor[:, [0,1,2]] -= curr_tens.mean()
     return tensor
 
 def center_latent_perchannel(tensor): # Does nothing different than above
@@ -729,15 +812,14 @@ def spectral_modulation_soft(image: Tensor, modulation_multiplier: float, spectr
     
     return inverse_transformed.real.to(image.device)
 
-import random
-def pyramid_noise_like(x, discount=0.9):
+def pyramid_noise_like(x, discount=0.9, generator=None, rand_source=random):
   b, c, w, h = x.shape # EDIT: w and h get over-written, rename for a different variant!
   u = torch.nn.Upsample(size=(w, h), mode='nearest-exact')
-  noise = torch.randn_like(x)
+  noise = gen_like(torch.randn, x, generator=generator)
   for i in range(10):
-    r = random.random()*2+2 # Rather than always going 2x, 
+    r = rand_source.random()*2+2 # Rather than always going 2x, 
     w, h = max(1, int(w/(r**i))), max(1, int(h/(r**i)))
-    noise += u(torch.randn(b, c, w, h).to(x)) * discount**i
+    noise += u(torch.randn(b, c, w, h, generator=generator).to(x)) * discount**i
     if w==1 or h==1: break # Lowest resolution is 1x1
   return noise/noise.std() # Scaled back to roughly unit variance
 
@@ -802,11 +884,11 @@ class ModelSamplerLatentMegaModifier:
                               "tonemap_method": (["reinhard", "reinhard_perchannel", "arctan", "quantile", "gated", "cfg-mimic", "spatial-norm"], ),
                               "tonemap_percentile": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 100.0, "step": 0.005}),
                               "contrast_multiplier": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
-                              "combat_method": (["subtract", "subtract_w_decorrelation", "subtract_median"], ),
+                              "combat_method": (["subtract", "subtract_channels", "subtract_median", "rescale_channels"], ),
                               "combat_cfg_drift": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                               "rescale_cfg_phi": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                               "extra_noise_type": (["gaussian", "uniform", "perlin", "pink", "green", "pyramid"], ),
-                              "extra_noise_method": (["add", "add_scaled", "speckle"], ),
+                              "extra_noise_method": (["add", "add_scaled", "speckle", "cads", "cads_rescaled", "cads_speckle", "cads_speckle_rescaled"], ),
                               "extra_noise_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1}),
                               "extra_noise_lowpass": ("INT", {"default": 100, "min": 0, "max": 1000, "step": 1}),
                               "divisive_norm_size": ("INT", {"default": 127, "min": 1, "max": 255, "step": 1}),
@@ -816,13 +898,23 @@ class ModelSamplerLatentMegaModifier:
                               "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 15.0, "step": 0.01}),
                               "affect_uncond": (["None", "Sharpness"], ),
                               "dyn_cfg_augmentation": (["None", "dyncfg-halfcosine", "dyncfg-halfcosine-mimic"], ),
-                              }}
+                              },
+                "optional": { "seed": ("INT", {"min": 0, "max": 0xffffffffffffffff})
+                            }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "mega_modify"
 
     CATEGORY = "clybNodes"
 
-    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation):
+    def mega_modify(self, model, sharpness_multiplier, sharpness_method, tonemap_multiplier, tonemap_method, tonemap_percentile, contrast_multiplier, combat_method, combat_cfg_drift, rescale_cfg_phi, extra_noise_type, extra_noise_method, extra_noise_multiplier, extra_noise_lowpass, divisive_norm_size, divisive_norm_multiplier, spectral_mod_mode, spectral_mod_percentile, spectral_mod_multiplier, affect_uncond, dyn_cfg_augmentation, seed=None):
+        gen = None
+        rand = random
+        if seed is not None:
+            gen = torch.Generator(device='cpu')
+            rand = random.Random()
+            gen.manual_seed(seed)
+            rand.seed(seed)
+
         def modify_latent(args):
             x_input = args["input"]
             cond = args["cond"]
@@ -843,19 +935,19 @@ class ModelSamplerLatentMegaModifier:
             if extra_noise_multiplier > 0:
                 match extra_noise_type:
                     case "gaussian":
-                        extra_noise = torch.randn_like(cond)
+                        extra_noise = gen_like(torch.randn, cond, generator=gen)
                     case "uniform":
-                        extra_noise = (torch.rand_like(cond) - 0.5) * 2 * 1.73
+                        extra_noise = (gen_like(torch.rand, cond, generator=gen) - 0.5) * 2 * 1.73
                     case "perlin":
                         cond_size_0 = cond.size(dim=2)
                         cond_size_1 = cond.size(dim=3)
-                        extra_noise = perlin_noise(grid_shape=(cond_size_0, cond_size_1), out_shape=(cond_size_0, cond_size_1), batch_size=4).to(cond.device).unsqueeze(0)
+                        extra_noise = perlin_noise(grid_shape=(cond_size_0, cond_size_1), out_shape=(cond_size_0, cond_size_1), batch_size=4, generator=gen).to(cond.device).unsqueeze(0)
                         mean = torch.mean(extra_noise)
                         std = torch.std(extra_noise)
 
                         extra_noise.sub_(mean).div_(std)
                     case "pink":
-                        extra_noise = generate_1f_noise(cond, 2, extra_noise_multiplier).to(cond.device)
+                        extra_noise = generate_1f_noise(cond, 2, extra_noise_multiplier, generator=gen).to(cond.device)
                         mean = torch.mean(extra_noise)
                         std = torch.std(extra_noise)
 
@@ -863,7 +955,7 @@ class ModelSamplerLatentMegaModifier:
                     case "green":
                         cond_size_0 = cond.size(dim=2)
                         cond_size_1 = cond.size(dim=3)
-                        extra_noise = green_noise(cond_size_0, cond_size_1).to(cond.device)
+                        extra_noise = green_noise(cond_size_0, cond_size_1, generator=gen).to(cond.device)
                         mean = torch.mean(extra_noise)
                         std = torch.std(extra_noise)
 
@@ -886,6 +978,18 @@ class ModelSamplerLatentMegaModifier:
                     case "speckle":
                         cond = cond + cond * extra_noise * alpha_noise
                         uncond = uncond - uncond * extra_noise * alpha_noise
+                    case "cads":
+                        cond = add_cads_custom_noise(cond, extra_noise, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, False)
+                        uncond = add_cads_custom_noise(uncond, extra_noise, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, False)
+                    case "cads_rescaled":
+                        cond = add_cads_custom_noise(cond, extra_noise, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, True)
+                        uncond = add_cads_custom_noise(uncond, extra_noise, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, True)
+                    case "cads_speckle":
+                        cond = add_cads_custom_noise(cond, extra_noise * cond, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, False)
+                        uncond = add_cads_custom_noise(uncond, extra_noise * uncond, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, False)
+                    case "cads_speckle_rescaled":
+                        cond = add_cads_custom_noise(cond, extra_noise * cond, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, True)
+                        uncond = add_cads_custom_noise(uncond, extra_noise * uncond, timestep, 0.6, 0.9, extra_noise_multiplier / 100., 1, True)
                     case _:
                         print("Haven't heard of a noise method named like that before... (Couldn't find method)")
 
@@ -1004,9 +1108,9 @@ class ModelSamplerLatentMegaModifier:
                         pred_uncentered = pred_renorm + mimic_means # Personal choice to re-mean from the mimic here... should be latent_means.
                         noise_pred_degraded = pred_uncentered.unflatten(2, noise_pred_degraded.shape[2:])
                     case "spatial-norm":
-                        time = (1.0 - (timestep / 999.0)[:, None, None, None].clone().item())
-                        time = -(math.cos(time * math.pi) / (3)) + (2/3) # 0.33333 to 1.0, half cosine
-                        noise_pred_degraded = spatial_norm_chw_thresholding(noise_pred_degraded, (tonemap_multiplier / 2 / cond_scale) * time)
+                        #time = (1.0 - (timestep / 999.0)[:, None, None, None].clone().item())
+                        #time = -(math.cos(time * math.pi) / (3)) + (2/3) # 0.33333 to 1.0, half cosine
+                        noise_pred_degraded = spatial_norm_chw_thresholding(noise_pred_degraded, tonemap_multiplier / 2 / cond_scale)
                     case _:
                         print("Could not tonemap, for the method was not found.")
 
@@ -1022,17 +1126,12 @@ class ModelSamplerLatentMegaModifier:
                 modulation_diff = modulation_func(noise_pred_degraded, spectral_mod_multiplier, spectral_mod_percentile) - noise_pred_degraded
                 noise_pred_degraded += modulation_diff
 
-            if contrast_multiplier > 0:
+            if contrast_multiplier > 0 or contrast_multiplier < 0:
                 contrast_func = contrast
                 # Contrast, after tonemapping, to ensure user-set contrast is expected to behave similarly across tonemapping settings
                 alpha = 1.0 - (timestep / 999.0)[:, None, None, None].clone()
                 alpha *= 0.001 * contrast_multiplier
                 noise_pred_degraded = contrast_func(noise_pred_degraded) * alpha + (noise_pred_degraded) * (1.0 - alpha) # Temporary fix for contrast is to add the input? Maybe? It just doesn't work like before...
-            if contrast_multiplier < 0:
-                contrast_func = contrast_with_mean # Unsure if good/bad, buuut its a nice alternative to combatting cfg drift directly
-                alpha = 1.0 - (timestep / 999.0)[:, None, None, None].clone()
-                alpha *= 0.001 * -contrast_multiplier # Since we're less than 0, we kinda wanna do the function properly!
-                noise_pred_degraded = contrast_func(noise_pred_degraded) * alpha + (noise_pred_degraded) * (1.0 - alpha)
 
             # Rescale CFG
             if rescale_cfg_phi == 0:
@@ -1060,11 +1159,14 @@ class ModelSamplerLatentMegaModifier:
                     case "subtract":
                         combat_drift_func = center_latent_perchannel
                         alpha *= combat_cfg_drift 
-                    case "subtract_w_decorrelation":
-                        combat_drift_func = center_latent_perchannel_with_decorrelate
+                    case "subtract_channels":
+                        combat_drift_func = center_0channel
                         alpha *= combat_cfg_drift
                     case "subtract_median":
                         combat_drift_func = center_latent_median
+                        alpha *= combat_cfg_drift
+                    case "rescale_channels":
+                        combat_drift_func = center_rescale
                         alpha *= combat_cfg_drift
                 x_final = combat_drift_func(x_final) * alpha + x_final * (1.0 - alpha) # Mix the modified latent with the existing latent by the alpha
 

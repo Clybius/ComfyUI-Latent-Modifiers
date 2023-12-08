@@ -40,11 +40,15 @@ This can lead to more perceptual detail, especially at higher strengths.
 
 
   `Closer to 100 percentile == stronger clamping, lower tonemapping_multiplier == stronger clamping`. Recommended values for testing: tonemap_multiplier of 0.33-1.0, tonemap_percentile of 100.</p>
+* Spatial-Norm: <p>Clamps the values according to the noise prediction's absolute mean in the spectral domain. `tonemap_multiplier` adjusts the strength of the clamping.
+
+
+  `Lower tonemapping_multiplier == stronger clamping`. Recommended value for testing: tonemap_multiplier of 0.5-2.0.</p>
 
 ### Contrast Explanation:
 <p>Scales the pixel values by the standard deviation, achieving a more contrasty look. In practice, this can effectively act as a secondary CFG slider for stylization. It doesn't modify subject poses much, if at all, which can be great for those looking to get more oomf out of their low-cfg setups.
 
-Using a negative value will not de-contrast, but instead will use a differing method to do the contrast operation. -33 ought to be near-equivalent to 33 in this case, for example. Feel free to play around and share which you prefer!</p>
+Using a negative value will apply the inverse of the operation to the latent.</p>
 
 ### Spectral Modification Explanation:
 <p>We boost the low frequencies (low rate of change in the noise), and we lower the high frequencies (high rates of change in the noise). 

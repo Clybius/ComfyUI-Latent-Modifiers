@@ -615,17 +615,16 @@ def center_0channel(tensor): #https://birchlabs.co.uk/machine-learning#combating
     tensor[:, [3]] += torch.copysign(torch.pow(torch.abs(mean_3), 1.5), mean_3)
     return tensor# - tensor.mean(dim=(2,3), keepdim=True)
 
-def channel_rescale(tensor):
-    """Rescales channels according to a vision I had."""
-    std_dev_0 = tensor[:, [0, 1, 2, 3]].std()
-    mean_0 = tensor[:, [0, 1, 2, 3]].mean()
-    mean_3 = tensor[:, [3]].mean()
+def channel_sharpen(tensor):
+    """Centers on 0 to combat CFG drift."""
+    flattened = tensor.flatten(2)
+    flat_std = flattened.std(dim=(2)).unsqueeze(2).expand(flattened.shape)
+    flattened *= flat_std
+    flattened -= flattened.mean(dim=(2)).unsqueeze(2).expand(flattened.shape)
+    flattened /= flat_std
+    tensor = flattened.unflatten(2, tensor.shape[2:])
+    return tensor
 
-    tensor[:, [0, 1, 2, 3]] = (tensor[:, [0, 1, 2, 3]] - mean_0) / std_dev_0
-    std_dev = tensor[:, [3]].std()
-    tensor[:, [3]] = (tensor[:, [3]] * std_dev) + mean_3
-
-    return tensor# - tensor.mean(dim=(2,3), keepdim=True)
 
 def center_012channel(tensor): #https://birchlabs.co.uk/machine-learning#combating-mean-drift-in-cfg
     """Centers on 0 to combat CFG drift."""
@@ -878,24 +877,24 @@ class ModelSamplerLatentMegaModifier:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "sharpness_multiplier": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                              "sharpness_multiplier": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
                               "sharpness_method": (["anisotropic", "joint-anisotropic", "gaussian", "cas"], ),
                               "tonemap_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                               "tonemap_method": (["reinhard", "reinhard_perchannel", "arctan", "quantile", "gated", "cfg-mimic", "spatial-norm"], ),
                               "tonemap_percentile": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 100.0, "step": 0.005}),
                               "contrast_multiplier": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1}),
-                              "combat_method": (["subtract", "subtract_channels", "subtract_median", "rescale_channels"], ),
-                              "combat_cfg_drift": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                              "rescale_cfg_phi": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                              "combat_method": (["subtract", "subtract_channels", "subtract_median", "sharpen"], ),
+                              "combat_cfg_drift": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                              "rescale_cfg_phi": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                               "extra_noise_type": (["gaussian", "uniform", "perlin", "pink", "green", "pyramid"], ),
                               "extra_noise_method": (["add", "add_scaled", "speckle", "cads", "cads_rescaled", "cads_speckle", "cads_speckle_rescaled"], ),
                               "extra_noise_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1}),
                               "extra_noise_lowpass": ("INT", {"default": 100, "min": 0, "max": 1000, "step": 1}),
                               "divisive_norm_size": ("INT", {"default": 127, "min": 1, "max": 255, "step": 1}),
-                              "divisive_norm_multiplier": ("FLOAT", {"default": 0, "min": 0, "max": 1, "step": 0.01}),
+                              "divisive_norm_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                               "spectral_mod_mode": (["hard_clamp", "soft_clamp"], ),
                               "spectral_mod_percentile": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 50.0, "step": 0.01}),
-                              "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 15.0, "step": 0.01}),
+                              "spectral_mod_multiplier": ("FLOAT", {"default": 0.0, "min": -15.0, "max": 15.0, "step": 0.01}),
                               "affect_uncond": (["None", "Sharpness"], ),
                               "dyn_cfg_augmentation": (["None", "dyncfg-halfcosine", "dyncfg-halfcosine-mimic"], ),
                               },
@@ -1115,7 +1114,7 @@ class ModelSamplerLatentMegaModifier:
                         print("Could not tonemap, for the method was not found.")
 
             # Spectral Modification
-            if spectral_mod_multiplier > 0:
+            if spectral_mod_multiplier > 0 or spectral_mod_multiplier < 0:
                 #alpha = 1. - (timestep / 999.0)[:, None, None, None].clone() # Get alpha multiplier, lower alpha at high sigmas/high noise
                 #alpha = spectral_mod_multiplier# User-input and weaken the strength so we don't annihilate the latent.
                 match spectral_mod_mode:
@@ -1144,16 +1143,9 @@ class ModelSamplerLatentMegaModifier:
                 x_rescaled = x_cfg * (ro_pos / ro_cfg)
                 x_final = rescale_cfg_phi * x_rescaled + (1.0 - rescale_cfg_phi) * x_cfg
 
-            if divisive_norm_multiplier > 0:
-                alpha = 1. - (timestep / 999.0)[:, None, None, None].clone()
-                alpha ** 0.025 # Alpha might as well be 1, but we want to protect the beginning steps (?).
-                alpha *= divisive_norm_multiplier
-                high_noise = divisive_normalization(x_final, (divisive_norm_size * 2) + 1)
-                x_final = high_noise * alpha + x_final * (1.0 - alpha)
-
-            if combat_cfg_drift > 0:
-                alpha = (1. - (timestep / 999.0)[:, None, None, None].clone()) * 2
-                alpha ** 0.025 # Alpha might as well be 1, but we want to protect the beginning steps (?).
+            if combat_cfg_drift > 0 or combat_cfg_drift < 0:
+                alpha = (1. - (timestep / 999.0)[:, None, None, None].clone())
+                alpha ** 0.025 # Alpha might as well be 1, but we want to protect the first steps (?).
                 alpha = alpha.clamp_(max=1)
                 match combat_method:
                     case "subtract":
@@ -1165,10 +1157,18 @@ class ModelSamplerLatentMegaModifier:
                     case "subtract_median":
                         combat_drift_func = center_latent_median
                         alpha *= combat_cfg_drift
-                    case "rescale_channels":
-                        combat_drift_func = center_rescale
+                    case "sharpen":
+                        combat_drift_func = channel_sharpen
                         alpha *= combat_cfg_drift
                 x_final = combat_drift_func(x_final) * alpha + x_final * (1.0 - alpha) # Mix the modified latent with the existing latent by the alpha
+            
+            if divisive_norm_multiplier > 0:
+                alpha = 1. - (timestep / 999.0)[:, None, None, None].clone()
+                alpha ** 0.025 # Alpha might as well be 1, but we want to protect the beginning steps (?).
+                alpha *= divisive_norm_multiplier
+                high_noise = divisive_normalization(x_final, (divisive_norm_size * 2) + 1)
+                x_final = high_noise * alpha + x_final * (1.0 - alpha)
+
 
             return x_input - (x - x_final * sigma / (sigma * sigma + 1.0) ** 0.5) # General formula for CFG. uncond + (cond - uncond) * cond_scale
 
